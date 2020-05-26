@@ -20,14 +20,18 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 #ifndef _CDJ_CLOCK_INCLUDE
 #define _CDJ_CLOCK_INCLUDE
 
-#include <RtMidi.hpp>
+#include "RtMidi.hpp"
+
+#if !defined(_WIN32)
 #include <net/bpf.h>
-#include <pcap.h>
-#include <sys/time.h>
-#include <signal.h>
-#include <sys/types.h>
 #include <sys/time.h>
 #include <sys/ioctl.h>
+#endif
+
+#include <pcap.h>
+#include <signal.h>
+#include <sys/types.h>
+#include <functional>
 
 #define PACKETLIST_SIZE 32
 #define SNAP_LEN 1518
@@ -88,8 +92,11 @@ class CdjClock {
         double lastCdjDiff;
         double tickCounts;
 
+#ifndef _WIN32
         struct itimerval it_val;
-
+#else
+		// XXX: need recurring loop
+#endif
         const std::vector<unsigned char> midiClock {0xF8};
         const std::vector<unsigned char> midiStart {0xFA};
         const std::vector<unsigned char> midiContinue {0xFB};
@@ -117,7 +124,11 @@ void GotPacketHandler(u_char *args,
                       const struct pcap_pkthdr *header, 
                       const u_char *packet);
 
+#ifdef _WIN32
+DWORD WINAPI pcapLoop(LPVOID arg);
+#else
 static void *pcapLoop(void *arg);
+#endif
 
 void MidiInCallbackHandler(double deltatime, 
                            std::vector<unsigned char> *message, 

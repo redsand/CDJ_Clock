@@ -19,6 +19,14 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 
 #include "CdjClock.hpp"
 
+
+#ifdef _WIN32
+int gettimeofday(struct timeval * tp, struct timezone * tzp);
+void __stdcall MidiTimerHandler(HWND hWnd, UINT nMsg, UINT_PTR nIDEvent, DWORD dwTime);
+#else
+void MidiTimerHandler(int i);
+#endif
+
 std::function<void(int)> CdjClockMidiTimer = NULL;
 
 CdjClock::CdjClock(int songPointerUp, 
@@ -68,6 +76,7 @@ void CdjClock::SongPositionOut() {
 }
 
 void CdjClock::MidiTimer(int i) {
+#ifndef _WIN32
     it_val.it_value.tv_sec = tickCounts / 1000;
     it_val.it_value.tv_usec = tickCounts * 1000;
     it_val.it_interval = it_val.it_value;
@@ -76,7 +85,7 @@ void CdjClock::MidiTimer(int i) {
     if (setitimer(ITIMER_REAL, &it_val, NULL) == -1) {
         std::cerr << "SET_ITIMER_ERR" << std::endl;
     } 
-    
+#endif
     if (clockCounter > 23) {
         struct timeval tv;
         gettimeofday(&tv, NULL);
@@ -373,21 +382,23 @@ void *CdjClock::GotPacket(const struct pcap_pkthdr *header,
 }
 
 int CdjClock::Run() {
-    if (midiDeviceIn == -1|| midiDeviceOut == -1) {
+
+	int iret=0;
+	char errBuf[PCAP_ERRBUF_SIZE];      // error buffer
+	pcap_t *handle;                     // packet capture handle
+	char filterExp[] = "port 50001";    // filter expression
+	struct bpf_program fp;              // compiled filter program
+	bpf_u_int32 mask;                   // subnet mask
+	bpf_u_int32 net;                    // ip
+	int numPackets = 0;                 // number of capture packets
+	int immediateModeOn = 1;
+
+	if (midiDeviceIn == -1|| midiDeviceOut == -1) {
         ProbeMidi();
         return 1;
     }
 
     SetupMidi();
-
-    char errBuf[PCAP_ERRBUF_SIZE];      // error buffer
-    pcap_t *handle;                     // packet capture handle
-    char filterExp[] = "port 50001";    // filter expression
-    struct bpf_program fp;              // compiled filter program
-    bpf_u_int32 mask;                   // subnet mask
-    bpf_u_int32 net;                    // ip
-    int numPackets = 0;                 // number of capture packets
-    int immediateModeOn = 1;
 
     char *device = new char[netDevice.size() + 1];
     std::copy(netDevice.begin(), netDevice.end(), device);
@@ -439,11 +450,12 @@ int CdjClock::Run() {
             std::cerr << "FD_FILE_DESCRIPTOR_GET_ERROR" << std::endl;
             return 2; 
         }
-
+#ifndef _WIN32
         if (ioctl(fd, BIOCIMMEDIATE, &immediateModeOn) == -1) {
             std::cerr << "BIOCIMMEDIATE_ERR: " << errBuf << std::endl;
             return 2;
         }
+#endif
     }
 
     // Ethernet device capture
@@ -468,6 +480,12 @@ int CdjClock::Run() {
                                  this, 
                                  std::placeholders::_1); 
 
+	PcapArgs pcapArgs;
+	pcapArgs.cdjClock = this;
+	pcapArgs.numPackets = numPackets;
+	pcapArgs.handle = handle;
+
+#ifndef _WIN32
     if (signal(SIGALRM, MidiTimerHandler) == SIG_ERR) {
         std::cerr << "SIGALRM_ERR" << std::endl;
     }
@@ -480,22 +498,34 @@ int CdjClock::Run() {
         std::cerr << "TIMER_SET_ERR" << std::endl;
     }
 
-
     pthread_t loopThread;
 
-    int iret;
-    
-    PcapArgs pcapArgs;
-    pcapArgs.cdjClock = this;
-    pcapArgs.numPackets = numPackets;
-    pcapArgs.handle = handle;
-
+  
     iret = pthread_create(&loopThread, 
                           NULL, 
                           pcapLoop,
                           &pcapArgs);
 
     pthread_join(loopThread, NULL);
+
+#else
+
+	// XXX: Implement the timer and thread routine
+	UINT TimerId = SetTimer(NULL, 0, tickCounts, &MidiTimerHandler);
+	HANDLE hThread;
+	DWORD dwThreadId;
+	hThread = CreateThread(NULL, 0, pcapLoop, &pcapArgs, 0, &dwThreadId);
+	if (hThread == INVALID_HANDLE_VALUE) {
+		pcap_freecode(&fp);
+		pcap_close(handle);
+		delete[] device;
+		std::cerr << "CREATE_THREAD_ERR: " << GetLastError() << std::endl;
+		return 1;
+	}
+
+	WaitForSingleObject(hThread, INFINITE);
+
+#endif
 
     pcap_freecode(&fp); 
     pcap_close(handle);
@@ -510,7 +540,12 @@ void GotPacketHandler(u_char *args,
     ((CdjClock*) args)->GotPacket(header, packet);
 }
 
-static void *pcapLoop(void *arg) { 
+#ifndef WIN32
+static void *pcapLoop(void *arg)
+#else
+DWORD WINAPI pcapLoop(LPVOID arg)
+#endif
+{ 
     PcapArgs *pcapArgs = (PcapArgs *) arg;
 
     pcap_loop(pcapArgs->handle, 
@@ -521,8 +556,13 @@ static void *pcapLoop(void *arg) {
     return NULL;
 }
 
-void MidiTimerHandler(int i){
-    CdjClockMidiTimer(i);
+#ifndef _WIN32
+void MidiTimerHandler(int i)
+#else
+void __stdcall MidiTimerHandler(HWND hWnd, UINT nMsg, UINT_PTR nIDEvent, DWORD dwTime)
+#endif
+{
+    CdjClockMidiTimer(dwTime);
     return;
 }
 
@@ -531,3 +571,26 @@ void MidiInCallbackHandler(double deltatime,
                            void *args) {
     ((CdjClock*) args)->MidiInCallback(deltatime, message);
 }
+
+#ifdef _WIN32
+int gettimeofday(struct timeval * tp, struct timezone * tzp)
+{
+	// Note: some broken versions only have 8 trailing zero's, the correct epoch has 9 trailing zero's
+	// This magic number is the number of 100 nanosecond intervals since January 1, 1601 (UTC)
+	// until 00:00:00 January 1, 1970 
+	static const uint64_t EPOCH = ((uint64_t)116444736000000000ULL);
+
+	SYSTEMTIME  system_time;
+	FILETIME    file_time;
+	uint64_t    time;
+
+	GetSystemTime(&system_time);
+	SystemTimeToFileTime(&system_time, &file_time);
+	time = ((uint64_t)file_time.dwLowDateTime);
+	time += ((uint64_t)file_time.dwHighDateTime) << 32;
+
+	tp->tv_sec = (long)((time - EPOCH) / 10000000L);
+	tp->tv_usec = (long)(system_time.wMilliseconds * 1000);
+	return 0;
+}
+#endif

@@ -44,7 +44,9 @@
 #define RTMIDI_H
 
 #if defined _WIN32 || defined __CYGWIN__
-  #define RTMIDI_DLL_PUBLIC
+#define RTMIDI_DLL_PUBLIC
+#define WIN32 1
+//#include <Windows.h>
 #else
   #if __GNUC__ >= 4
     #define RTMIDI_DLL_PUBLIC __attribute__( (visibility( "default" )) )
