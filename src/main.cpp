@@ -73,7 +73,6 @@ int main(int argc, const char** argv) {
 #ifdef _WIN32
 	if (argc == 1) {
 		list_interfaces();
-		return 1;
 	}
 #endif
 
